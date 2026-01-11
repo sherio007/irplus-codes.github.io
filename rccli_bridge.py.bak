@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""
+Samsung TV Control Bridge
+Provides a web server to control Samsung TV via HTTP requests
+"""
+
+import asyncio
+import websockets
+import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
+import ssl
+import socket
+
+TV_IP = '192.168.23.25'
+MY_TOKEN = '78091086'
+NAME = 'Master_Controller'
+
+class TVController:
+    def __init__(self):
+        self.ws_connection = None
+    
+    async def connect_to_tv(self):
+        """Connect to Samsung TV via WebSocket"""
+        uri = f"wss://{TV_IP}:8002/api/v2/channels/samsung.remote.control?name={NAME}&token={MY_TOKEN}"
+        
+        # Create SSL context that ignores certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        try:
+            self.ws_connection = await websockets.connect(
+                uri, 
+                extra_headers={"Origin": "http://localhost"},
+                ssl=ssl_context
+            )
+            print(f"✅ Connected to TV at {TV_IP}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to connect to TV: {e}")
+            return False
+    
+    async def send_key(self, key):
+        """Send a key command to the TV"""
+        if not self.ws_connection:
+            if not await self.connect_to_tv():
+                return False
+        
+        payload = {
+            "method": "ms.channel.emit",
+            "params": {
+                "event": "ed.remote.control",
+                "to": "host",
+                "data": {
+                    "type": "method",
+                    "key": key,
+                    "base64": "false"
+                }
+            }
+        }
+        
+        try:
+            await self.ws_connection.send(json.dumps(payload))
+            print(f"✅ Sent key: {key}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to send key {key}: {e}")
+            # Try to reconnect
+            self.ws_connection = None
+            if await self.connect_to_tv():
+                await self.ws_connection.send(json.dumps(payload))
+                print(f"✅ Sent key after reconnection: {key}")
+                return True
+            return False
+    
+    async def launch_app(self, app_id, meta_tag=""):
+        """Launch an app on the TV"""
+        if not self.ws_connection:
+            if not await self.connect_to_tv():
+                return False
+        
+        payload = {
+            "method": "ms.channel.emit",
+            "params": {
+                "event": "ed.apps.launch",
+                "to": "host",
+                "data": {
+                    "appId": app_id,
+                    "action_type": "NATIVE_LAUNCH",
+                    "metaTag": meta_tag
+                }
+            }
+        }
+        
+        try:
+            await self.ws_connection.send(json.dumps(payload))
+            print(f"✅ Launched app: {app_id}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to launch app {app_id}: {e}")
+            return False
+
+# Global TV controller instance
+tv_controller = TVController()
+
+class RequestHandler(BaseHTTPRequestHandler):
+    def _send_response(self, status_code, response_data):
+        """Send HTTP response"""
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+        
+        if isinstance(response_data, dict):
+            self.wfile.write(json.dumps(response_data).encode())
+        else:
+            self.wfile.write(response_data.encode())
+    
+    def do_OPTIONS(self):
+        """Handle preflight CORS requests"""
+        self._send_response(200, {"status": "OK"})
+    
+    def do_GET(self):
+        """Handle GET requests for TV control"""
+        parsed_path = urllib.parse.urlparse(self.path)
+        path_parts = parsed_path.path.strip('/').split('/')
+        
+        if path_parts[0] == 'key':
+            if len(path_parts) > 1:
+                key = path_parts[1]
+                print(f"Received key request: {key}")
+                
+                # Handle the request asynchronously
+                async def handle_key():
+                    success = await tv_controller.send_key(key)
+                    return {"success": success, "key": key}
+                
+                # Run the async function
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(handle_key())
+                loop.close()
+                
+                self._send_response(200, result)
+            else:
+                self._send_response(400, {"error": "No key specified"})
+        elif path_parts[0] == 'launch':
+            if len(path_parts) > 1:
+                app_id = path_parts[1]
+                query_params = urllib.parse.parse_qs(parsed_path.query)
+                meta_tag = query_params.get('metaTag', [''])[0]
+                
+                async def handle_launch():
+                    success = await tv_controller.launch_app(app_id, meta_tag)
+                    return {"success": success, "app_id": app_id, "meta_tag": meta_tag}
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(handle_launch())
+                loop.close()
+                
+                self._send_response(200, result)
+            else:
+                self._send_response(400, {"error": "No app ID specified"})
+        elif self.path == '/status':
+            self._send_response(200, {"status": "running", "tv_ip": TV_IP})
+        else:
+            # Serve the control HTML page if requesting root
+            if self.path == '/' or self.path == '/control.html':
+                html_content = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Samsung TV Remote Control</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .remote-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .keypad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .key-btn {
+            padding: 15px;
+            font-size: 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .key-btn:hover {
+            background: #0056b3;
+        }
+        .key-btn:active {
+            transform: scale(0.98);
+        }
+        .power-btn {
+            background: #dc3545 !important;
+        }
+        .power-btn:hover {
+            background: #c82333 !important;
+        }
+        .info-panel {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        input, button {
+            margin: 5px;
+            padding: 10px;
+        }
+        .channel-input {
+            width: 100px;
+        }
+        .volume-control {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="remote-container">
+        <h1>📺 Samsung TV Remote Control</h1>
+        
+        <div class="info-panel">
+            <strong>TV IP:</strong> 192.168.23.25<br>
+            <strong>Status:</strong> <span id="tv-status">Connecting...</span>
+        </div>
+        
+        <div class="keypad">
+            <button class="key-btn power-btn" onclick="sendKey('KEY_POWER')">Power</button>
+            <button class="key-btn" onclick="sendKey('KEY_SOURCE')">Source</button>
+            <button class="key-btn" onclick="sendKey('KEY_HOME')">Home</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_UP')">↑</button>
+            <button class="key-btn" onclick="sendKey('KEY_CH_LIST')">CH LIST</button>
+            <button class="key-btn" onclick="sendKey('KEY_DOWN')">↓</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_LEFT')">←</button>
+            <button class="key-btn" onclick="sendKey('KEY_ENTER')">OK</button>
+            <button class="key-btn" onclick="sendKey('KEY_RIGHT')">→</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_VOLUP')">Vol +</button>
+            <button class="key-btn" onclick="sendKey('KEY_MUTE')">Mute</button>
+            <button class="key-btn" onclick="sendKey('KEY_VOLDOWN')">Vol -</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_CHUP')">CH +</button>
+            <button class="key-btn" onclick="sendKey('KEY_MENU')">Menu</button>
+            <button class="key-btn" onclick="sendKey('KEY_CHDOWN')">CH -</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_1')">1</button>
+            <button class="key-btn" onclick="sendKey('KEY_2')">2</button>
+            <button class="key-btn" onclick="sendKey('KEY_3')">3</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_4')">4</button>
+            <button class="key-btn" onclick="sendKey('KEY_5')">5</button>
+            <button class="key-btn" onclick="sendKey('KEY_6')">6</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_7')">7</button>
+            <button class="key-btn" onclick="sendKey('KEY_8')">8</button>
+            <button class="key-btn" onclick="sendKey('KEY_9')">9</button>
+            
+            <button class="key-btn" onclick="sendKey('KEY_PREVIOUS')">Prev</button>
+            <button class="key-btn" onclick="sendKey('KEY_0')">0</button>
+            <button class="key-btn" onclick="sendKey('KEY_RETURN')">Return</button>
+        </div>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <input type="text" id="channel-input" class="channel-input" placeholder="Channel" maxlength="4">
+            <button onclick="changeChannel()">Set Channel</button>
+        </div>
+        
+        <div class="volume-control">
+            <button onclick="sendKey('KEY_VOLUP')"> louder </button>
+            <button onclick="sendKey('KEY_VOLDOWN')"> quieter </button>
+            <button onclick="sendKey('KEY_MUTE')"> mute/unmute </button>
+        </div>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <button onclick="openBrowser()" style="padding: 15px; font-size: 18px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer;">🌐 Open Browser</button>
+        </div>
+        
+        <div style="text-align: center; margin-top: 20px;">
+            <textarea id="log-area" rows="5" style="width: 100%; padding: 10px;" readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = window.location.origin;
+        
+        async function sendKey(key) {
+            logMessage(`Sending key: ${key}`);
+            try {
+                const response = await fetch(`${BASE_URL}/key/${key}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    logMessage(`✓ Key sent: ${key}`);
+                } else {
+                    logMessage(`✗ Failed to send key: ${key}`);
+                }
+            } catch (error) {
+                logMessage(`✗ Error: ${error.message}`);
+            }
+        }
+        
+        function changeChannel() {
+            const channelInput = document.getElementById('channel-input');
+            const channel = channelInput.value.trim();
+            
+            if (!channel || isNaN(channel)) {
+                logMessage('Please enter a valid channel number');
+                return;
+            }
+            
+            // Clear the input field
+            channelInput.value = '';
+            
+            // Send each digit individually
+            for (let digit of channel) {
+                sendKey(`KEY_${digit}`);
+            }
+            
+            // Press ENTER after entering the channel
+            setTimeout(() => {
+                sendKey('KEY_ENTER');
+            }, 500);
+        }
+        
+        function openBrowser() {
+            logMessage('Opening browser on TV...');
+            // This would typically be handled by a special endpoint
+            // For now, we'll just send a notification
+            sendKey('KEY_HOME'); // Go home first
+            setTimeout(() => {
+                // Launch browser via the Python backend
+                fetch(`${BASE_URL}/launch/org.tizen.browser?metaTag=http://192.168.23.20:8080/control.html`)
+                    .then(r => r.json())
+                    .then(result => logMessage(result.success ? 'Browser opened!' : 'Failed to open browser'));
+            }, 1000);
+        }
+        
+        function logMessage(message) {
+            const logArea = document.getElementById('log-area');
+            const timestamp = new Date().toLocaleTimeString();
+            logArea.value += `[${timestamp}] ${message}\\n`;
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        
+        // Check connection status
+        fetch(`${BASE_URL}/status`)
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('tv-status').textContent = 'Ready';
+                logMessage('Remote control ready!');
+            })
+            .catch(error => {
+                document.getElementById('tv-status').textContent = 'Error connecting';
+                logMessage(`Connection error: ${error.message}`);
+            });
+        
+        // Allow pressing Enter in channel input
+        document.getElementById('channel-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                changeChannel();
+            }
+        });
+    </script>
+</body>
+</html>'''
+                self._send_response(200, html_content)
+            else:
+                self._send_response(404, {"error": "Not found"})
+
+async def start_websocket_server():
+    """Initialize and run the TV controller"""
+    print("Initializing TV controller...")
+    await tv_controller.connect_to_tv()
+
+def run_server():
+    """Run the HTTP server in a separate thread"""
+    server_address = ('', 8080)
+    httpd = HTTPServer(server_address, RequestHandler)
+    print("🚀 Server running on port 8080")
+    print("🌐 Access the remote at: http://localhost:8080 or http://192.168.23.20:8080")
+    httpd.serve_forever()
+
+if __name__ == "__main__":
+    # Start the WebSocket connection first
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Initialize the TV connection
+    loop.run_until_complete(start_websocket_server())
+    
+    # Start the HTTP server in a separate thread
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    
+    print("\n✅ TV Control Bridge is running!")
+    print("📋 Usage:")
+    <REDACTED_EMAIL>
+    print("   - Web interface: http://localhost:8080 or http://192.168.23.20:8080")
+    print("   - Send key: GET request to /key/{KEY_NAME}")
+    print("   - Example: http://localhost:8080/key/KEY_MENU")
+    
+    try:
+        # Keep the main thread alive
+        while True:
+            loop.run_forever()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down TV Control Bridge...")

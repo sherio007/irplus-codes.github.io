@@ -1,0 +1,24 @@
+{
+  "name": "samsung-tv-control-complete",
+  "version": "1.0.0",
+  "description": "Complete Samsung TV control system with WebSocket, HTTP bridge, and SmartThings-like web interface",
+  "main": "rccli_bridge.py",
+  "scripts": {
+    "start": "python3 rccli_bridge.py",
+    "smartthings": "python3 rccli_bridge.py",
+    "test-key": "node send_key_direct.js KEY_INFO",
+    "browser": "node force_open_browser.js",
+    "menu": "node send_key_direct.js KEY_MENU",
+    "home": "node send_key_direct.js KEY_HOME",
+    "vol-up": "node send_key_direct.js KEY_VOLUP",
+    "vol-down": "node send_key_direct.js KEY_VOLDOWN",
+    "ch-up": "node send_key_direct.js KEY_CHUP",
+    "ch-down": "node send_key_direct.js KEY_CHDOWN"
+  },
+  "keywords": ["samsung", "tv", "remote", "control", "smartthings", "websocket"],
+  "author": "Master_Controller",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.14.2"
+  }
+}
