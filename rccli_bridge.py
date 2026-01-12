@@ -33,7 +33,7 @@ class TVController:
         try:
             self.ws_connection = await websockets.connect(
                 uri, 
-                extra_headers={"Origin": "http://localhost"},
+                additional_headers={"Origin": "http://localhost"},
                 ssl=ssl_context
             )
             print(f"✅ Connected to TV at {TV_IP}")
